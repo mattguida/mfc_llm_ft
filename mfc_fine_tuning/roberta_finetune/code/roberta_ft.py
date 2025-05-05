@@ -34,7 +34,6 @@ def load_data(file_path):
             data = json.load(f)
         return data
     except json.JSONDecodeError:
-        # Try reading as JSONL if JSON parsing fails
         data = []
         with open(file_path, 'r') as f:
             for line in f:
@@ -45,33 +44,27 @@ def load_data(file_path):
         return data
 
 def prepare_datasets(data, tokenizer, max_length, seed=42):
-    # Extract sentences and labels
     sentences = [item['sentence'] for item in data]
     labels = [int(item['label']) for item in data]
     
-    # Get unique labels and create label mapping
     unique_labels = sorted(list(set(labels)))
     label_map = {label: i for i, label in enumerate(unique_labels)}
     mapped_labels = [label_map[label] for label in labels]
     
-    # Create features dict for datasets library
     features = {
         'sentence': sentences,
         'label': mapped_labels,
-        'topic': [item.get('topic', '') for item in data]  # Include topic if available
+        'topic': [item.get('topic', '') for item in data] 
     }
     
-    # Create a single dataset and split
     dataset = Dataset.from_dict(features)
     
-    # Split into train, validation, test (80%, 10%, 10%)
     splits = dataset.train_test_split(test_size=0.2, seed=seed)
     train_dataset = splits['train']
     test_val = splits['test'].train_test_split(test_size=0.5, seed=seed)
     val_dataset = test_val['train']
     test_dataset = test_val['test']
     
-    # Tokenize datasets with static padding
     def tokenize_function(examples):
         return tokenizer(
             examples['sentence'], 
@@ -84,7 +77,6 @@ def prepare_datasets(data, tokenizer, max_length, seed=42):
     tokenized_val = val_dataset.map(tokenize_function, batched=True)
     tokenized_test = test_dataset.map(tokenize_function, batched=True)
     
-    # Keep useful columns and format for Trainer
     tokenized_train = tokenized_train.remove_columns(['sentence', 'topic'])
     tokenized_val = tokenized_val.remove_columns(['sentence', 'topic'])
     tokenized_test = tokenized_test.remove_columns(['sentence', 'topic'])
@@ -114,11 +106,9 @@ def compute_metrics(pred):
 def main():
     args = parse_args()
     
-    # Set random seeds for reproducibility
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    # Load and prepare data
     data = load_data(args.data_path)
     print(f"Loaded {len(data)} examples")
     
@@ -126,10 +116,8 @@ def main():
         print("Using small dataset (100 instances) for testing")
         data = data[:100]
     
-    # Initialize tokenizer
     tokenizer = RobertaTokenizer.from_pretrained(args.model_name)
     
-    # Prepare datasets
     train_dataset, val_dataset, test_dataset, num_labels, label_map = prepare_datasets(
         data, tokenizer, args.max_length, args.seed
     )
@@ -138,13 +126,11 @@ def main():
     print(f"Number of classes: {num_labels}")
     print(f"Label mapping: {label_map}")
     
-    # Initialize model
     model = RobertaForSequenceClassification.from_pretrained(
         args.model_name, 
         num_labels=num_labels
     )
     
-    # Define training arguments
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         evaluation_strategy="epoch",
@@ -157,14 +143,13 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="f1",
         #report_to="wandb",
-        save_total_limit=2,  # Keep only the 2 best checkpoints
-        fp16=torch.cuda.is_available(),  # Use mixed precision training if available
+        save_total_limit=2,  
+        fp16=torch.cuda.is_available(),  
         logging_strategy="epoch",
-        warmup_ratio=0.1,  # 5% of training steps for warmup
-        lr_scheduler_type="linear"  # Linear decrease after warmup
+        warmup_ratio=0.1,  
+        lr_scheduler_type="linear" 
     )
-    
-    # Initialize trainer (without data_collator)
+ 
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -175,29 +160,23 @@ def main():
         callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
     )
     
-    # Train the model
     print("Starting training...")
     trainer.train()
     
-    # Evaluate on test set
     print("Evaluating on test set...")
     test_results = trainer.evaluate(test_dataset)
     print(f"Test results: {test_results}")
     
-    # Save the final model
     trainer.save_model(f"{args.output_dir}/final_model")
     tokenizer.save_pretrained(f"{args.output_dir}/final_model")
     
-    # Save label mapping
     with open(f"{args.output_dir}/final_model/label_map.json", 'w') as f:
         json.dump(label_map, f)
     
-    # Generate detailed classification report
     predictions = trainer.predict(test_dataset)
     preds = predictions.predictions.argmax(-1)
     labels = predictions.label_ids
     
-    # Convert back to original labels for the report
     reverse_map = {v: k for k, v in label_map.items()}
     original_preds = [reverse_map[p] for p in preds]
     original_labels = [reverse_map[l] for l in labels]

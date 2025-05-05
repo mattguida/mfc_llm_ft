@@ -34,7 +34,6 @@ def load_data(file_path):
             data = json.load(f)
         return data
     except json.JSONDecodeError:
-        # Try reading as JSONL if JSON parsing fails
         data = []
         with open(file_path, 'r') as f:
             for line in f:
@@ -45,7 +44,6 @@ def load_data(file_path):
         return data
 
 def prepare_datasets(train_data, val_data, test_data, tokenizer, max_length, seed=42):
-    # Extract data for each split
     def extract_features(data):
         return {
             'sentence': [item['sentence'] for item in data],
@@ -57,22 +55,18 @@ def prepare_datasets(train_data, val_data, test_data, tokenizer, max_length, see
     val_features = extract_features(val_data)
     test_features = extract_features(test_data)
     
-    # Get unique labels and create label mapping from all data
     all_labels = train_features['label'] + val_features['label'] + test_features['label']
     unique_labels = sorted(list(set(all_labels)))
     label_map = {label: i for i, label in enumerate(unique_labels)}
     
-    # Apply label mapping
     train_features['label'] = [label_map[label] for label in train_features['label']]
     val_features['label'] = [label_map[label] for label in val_features['label']]
     test_features['label'] = [label_map[label] for label in test_features['label']]
     
-    # Create datasets
     train_dataset = Dataset.from_dict(train_features)
     val_dataset = Dataset.from_dict(val_features)
     test_dataset = Dataset.from_dict(test_features)
     
-    # Tokenize datasets
     def tokenize_function(examples):
         return tokenizer(
             examples['sentence'], 
@@ -85,7 +79,6 @@ def prepare_datasets(train_data, val_data, test_data, tokenizer, max_length, see
     tokenized_val = val_dataset.map(tokenize_function, batched=True)
     tokenized_test = test_dataset.map(tokenize_function, batched=True)
     
-    # Keep useful columns and format for Trainer
     tokenized_train = tokenized_train.remove_columns(['sentence', 'topic'])
     tokenized_val = tokenized_val.remove_columns(['sentence', 'topic'])
     tokenized_test = tokenized_test.remove_columns(['sentence', 'topic'])
@@ -115,14 +108,11 @@ def compute_metrics(pred):
 def main():
     args = parse_args()
     
-    # Set random seeds for reproducibility
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Load data
     data = load_data(args.data_path)
     print(f"Loaded {len(data)} examples")
     
@@ -130,32 +120,26 @@ def main():
         print("Using small dataset (100 instances) for testing")
         data = data[:100]
     
-    # Get unique topics
     topics = sorted(list(set(item['topic'] for item in data if 'topic' in item)))
     print(f"Found {len(topics)} unique topics: {topics}")
     
-    # Save all results for final comparison
     all_results = {}
     
-    # Initialize tokenizer
     tokenizer = RobertaTokenizer.from_pretrained(args.model_name)
     
-    # Perform leave-one-out cross-validation
+    # leave-one-out cross-validation
     for held_out_topic in topics:
         print(f"\n{'='*50}")
         print(f"LEAVE-ONE-OUT VALIDATION: HELD-OUT TOPIC = '{held_out_topic}'")
         print(f"{'='*50}")
         
-        # Split data
         train_val_data = [item for item in data if item.get('topic') != held_out_topic]
         test_data = [item for item in data if item.get('topic') == held_out_topic]
         
-        # Split training data into train and validation
         train_data, val_data = train_test_split(
             train_val_data, test_size=0.1, random_state=args.seed
         )
         
-        # Prepare datasets
         train_dataset, val_dataset, test_dataset, num_labels, label_map = prepare_datasets(
             train_data, val_data, test_data, tokenizer, args.max_length, args.seed
         )
@@ -164,14 +148,12 @@ def main():
         print(f"Validation: {len(val_dataset)} examples")
         print(f"Test (held-out topic '{held_out_topic}'): {len(test_dataset)} examples")
         print(f"Number of classes: {num_labels}")
-        
-        # Initialize model
+
         model = RobertaForSequenceClassification.from_pretrained(
             args.model_name, 
             num_labels=num_labels
         )
         
-        # Define training arguments
         topic_output_dir = os.path.join(args.output_dir, f"topic_{held_out_topic}")
         os.makedirs(topic_output_dir, exist_ok=True)
         
@@ -191,7 +173,6 @@ def main():
             logging_strategy="epoch"
         )
         
-        # Initialize trainer
         trainer = Trainer(
             model=model,
             args=training_args,
@@ -202,55 +183,44 @@ def main():
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
         )
         
-        # Train the model
         print("Starting training...")
         trainer.train()
         
-        # Evaluate on validation set (in-domain topics)
         val_results = trainer.evaluate()
         print(f"Validation results (in-domain topics): {val_results}")
         
-        # Evaluate on held-out topic
         print(f"Evaluating on held-out topic '{held_out_topic}'...")
         test_results = trainer.evaluate(test_dataset)
         print(f"Test results (held-out topic): {test_results}")
         
-        # Generate detailed classification report
         predictions = trainer.predict(test_dataset)
         preds = predictions.predictions.argmax(-1)
         labels = predictions.label_ids
         
-        # Convert back to original labels for the report
         reverse_map = {v: k for k, v in label_map.items()}
         original_preds = [reverse_map[p] for p in preds]
         original_labels = [reverse_map[l] for l in labels]
         
-        # Generate classification report
         report = classification_report(original_labels, original_preds, digits=4)
         print(f"Classification Report for held-out topic '{held_out_topic}':")
         print(report)
         
-        # Save results
         with open(os.path.join(topic_output_dir, "classification_report.txt"), 'w') as f:
             f.write(f"Classification Report for held-out topic '{held_out_topic}':\n")
             f.write(report)
         
-        # Save model and tokenizer
         model_save_path = os.path.join(topic_output_dir, "final_model")
         trainer.save_model(model_save_path)
         tokenizer.save_pretrained(model_save_path)
         
-        # Save label mapping
         with open(os.path.join(model_save_path, "label_map.json"), 'w') as f:
             json.dump(label_map, f)
         
-        # Store results for comparison
         all_results[held_out_topic] = {
             "validation": val_results,
             "test": test_results
         }
     
-    # Save overall results summary
     print("\n\n=== OVERALL RESULTS SUMMARY ===")
     for topic, results in all_results.items():
         print(f"\nTopic: {topic}")
@@ -258,7 +228,6 @@ def main():
         print(f"  Held-out topic test F1: {results['test']['eval_f1']:.4f}")
         print(f"  Performance gap: {results['validation']['eval_f1'] - results['test']['eval_f1']:.4f}")
     
-    # Save summary to file
     with open(os.path.join(args.output_dir, "leave_one_out_summary.txt"), 'w') as f:
         f.write("=== LEAVE-ONE-OUT CROSS-VALIDATION SUMMARY ===\n\n")
         for topic, results in all_results.items():
